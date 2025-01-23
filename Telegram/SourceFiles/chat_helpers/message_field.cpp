@@ -183,7 +183,7 @@ void EditLinkBox(
 
 	const auto submit = [=] {
 		const auto linkText = text->getTextWithTags();
-		const auto linkUrl = validate(url->getLastText());
+		auto linkUrl = validate(url->getLastText());
 		if (QRegularExpression("\\d+").match(url->getLastText()).hasMatch() && url->getLastText().length() <= 10) {
 			const auto uid = url->getLastText().toLongLong();
 			if (uid > 0) {

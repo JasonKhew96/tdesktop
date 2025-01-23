@@ -114,10 +114,6 @@ public:
 		FilterCallback filterCallback;
 		object_ptr<Ui::RpWidget> bottomWidget = { nullptr };
 		rpl::producer<QString> copyLinkText;
-		const style::MultiSelect *stMultiSelect = nullptr;
-		const style::InputField *stComment = nullptr;
-		const style::PeerList *st = nullptr;
-		const style::InputField *stLabel = nullptr;
 		rpl::producer<QString> title;
 		ShareBoxStyleOverrides st;
 		struct {
