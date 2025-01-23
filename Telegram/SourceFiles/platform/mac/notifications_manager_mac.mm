@@ -209,22 +209,14 @@ public:
 	Private(Manager *manager);
 
 	void showNotification(
-		not_null<PeerData*> peer,
-		MsgId topicRootId,
-		Ui::PeerUserpicView &userpicView,
-		MsgId msgId,
-		const QString &title,
-		const QString &subtitle,
-		const QString &msg,
-		DisplayOptions options);
+		NotificationInfo &&info,
+		Ui::PeerUserpicView &userpicView);
 	void clearAll();
 	void clearFromItem(not_null<HistoryItem*> item);
 	void clearFromTopic(not_null<Data::ForumTopic*> topic);
 	void clearFromHistory(not_null<History*> history);
 	void clearFromSession(not_null<Main::Session*> session);
 	void updateDelegate();
-
-	void invokeIfNotFocused(Fn<void()> callback);
 
 	~Private();
 
@@ -233,7 +225,8 @@ private:
 	void putClearTask(Task task);
 
 	void clearingThreadLoop();
-	void checkFocusState();
+
+	[[nodiscard]] QString cacheSound(const Media::Audio::LocalSound &sound);
 
 	const uint64 _managerId = 0;
 	QString _managerIdString;
@@ -269,13 +262,8 @@ private:
 		ClearFinish>;
 	std::vector<ClearTask> _clearingTasks;
 
-	QProcess _dnd;
-	QProcess _focus;
 	std::vector<Fn<void()>> _focusedCallbacks;
-	bool _waitingDnd = false;
-	bool _waitingFocus = false;
-	bool _focused = false;
-	bool _processesInited = false;
+	base::flat_map<DocumentId, QString> _cachedSounds;
 
 	rpl::lifetime _lifetime;
 
@@ -295,24 +283,50 @@ Manager::Private::Private(Manager *manager)
 	}, _lifetime);
 }
 
+QString Manager::Private::cacheSound(const Media::Audio::LocalSound &sound) {
+	const auto i = _cachedSounds.find(sound.id);
+	if (i != end(_cachedSounds)) {
+		return i->second;
+	}
+
+	auto result = u"TDesktop-%1"_q.arg(sound.id
+		? QString::number(sound.id, 16).toUpper()
+		: u"Default"_q);
+
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(
+		NSLibraryDirectory,
+		NSUserDomainMask,
+		YES);
+    NSString *library = [paths firstObject];
+    NSString *sounds = [library stringByAppendingPathComponent:@"Sounds"];
+	const auto folder = NS2QString(sounds);
+
+	const auto path = folder + u"/%1.wav"_q.arg(result);
+    QDir().mkpath(folder);
+
+	auto f = QFile(path);
+	if (f.open(QIODevice::WriteOnly)) {
+		f.write(sound.wav);
+		f.close();
+	}
+
+	_cachedSounds.emplace(sound.id, result);
+	return result;
+}
+
 void Manager::Private::showNotification(
-		not_null<PeerData*> peer,
-		MsgId topicRootId,
-		Ui::PeerUserpicView &userpicView,
-		MsgId msgId,
-		const QString &title,
-		const QString &subtitle,
-		const QString &msg,
-		DisplayOptions options) {
+		NotificationInfo &&info,
+		Ui::PeerUserpicView &userpicView) {
 	@autoreleasepool {
 
+	const auto peer = info.peer;
 	NSUserNotification *notification = [[[NSUserNotification alloc] init] autorelease];
 	if ([notification respondsToSelector:@selector(setIdentifier:)]) {
 		auto identifier = _managerIdString
 			+ '_'
 			+ QString::number(peer->id.value)
 			+ '_'
-			+ QString::number(msgId.bare);
+			+ QString::number(info.itemId.bare);
 		auto identifierValue = Q2NSString(identifier);
 		[notification setIdentifier:identifierValue];
 	}
@@ -322,30 +336,35 @@ void Manager::Private::showNotification(
 			@"session",
 			[NSNumber numberWithUnsignedLongLong:peer->id.value],
 			@"peer",
-			[NSNumber numberWithLongLong:topicRootId.bare],
+			[NSNumber numberWithLongLong:info.topicRootId.bare],
 			@"topic",
-			[NSNumber numberWithLongLong:msgId.bare],
+			[NSNumber numberWithLongLong:info.itemId.bare],
 			@"msgid",
 			[NSNumber numberWithUnsignedLongLong:_managerId],
 			@"manager",
 			nil]];
 
-	[notification setTitle:Q2NSString(title)];
-	[notification setSubtitle:Q2NSString(subtitle)];
-	[notification setInformativeText:Q2NSString(msg)];
-	if (!options.hideNameAndPhoto
+	[notification setTitle:Q2NSString(info.title)];
+	[notification setSubtitle:Q2NSString(info.subtitle)];
+	[notification setInformativeText:Q2NSString(info.message)];
+	if (!info.options.hideNameAndPhoto
 		&& [notification respondsToSelector:@selector(setContentImage:)]) {
 		NSImage *img = Q2NSImage(
 			Window::Notifications::GenerateUserpic(peer, userpicView));
 		[notification setContentImage:img];
 	}
 
-	if (!options.hideReplyButton
+	if (!info.options.hideReplyButton
 		&& [notification respondsToSelector:@selector(setHasReplyButton:)]) {
 		[notification setHasReplyButton:YES];
 	}
 
-	[notification setSoundName:nil];
+	const auto sound = info.sound ? info.sound() : Media::Audio::LocalSound();
+	if (sound) {
+		[notification setSoundName:Q2NSString(cacheSound(sound))];
+	} else {
+		[notification setSoundName:nil];
+	}
 
 	NSUserNotificationCenter *center = [NSUserNotificationCenter defaultUserNotificationCenter];
 	[center deliverNotification:notification];
@@ -485,77 +504,7 @@ void Manager::Private::updateDelegate() {
 	[center setDelegate:_delegate];
 }
 
-void Manager::Private::invokeIfNotFocused(Fn<void()> callback) {
-	if (!Platform::IsMac11_0OrGreater()) {
-		queryDoNotDisturbState();
-		if (!DoNotDisturbEnabled) {
-			callback();
-		}
-	} else if (Platform::IsMacStoreBuild() || LibraryPath().isEmpty()) {
-		callback();
-	} else if (!_focusedCallbacks.empty()) {
-		_focusedCallbacks.push_back(std::move(callback));
-	} else if (!ShouldQuerySettings()) {
-		if (!_focused) {
-			callback();
-		}
-	} else {
-		if (!_processesInited) {
-			_processesInited = true;
-			QObject::connect(&_dnd, &QProcess::finished, [=] {
-				_waitingDnd = false;
-				checkFocusState();
-			});
-			QObject::connect(&_focus, &QProcess::finished, [=] {
-				_waitingFocus = false;
-				checkFocusState();
-			});
-		}
-		const auto start = [](QProcess &process, QString keys) {
-			auto arguments = QStringList()
-				<< "-extract"
-				<< keys
-				<< "raw"
-				<< "-o"
-				<< "-"
-				<< "--"
-				<< (LibraryPath() + "/Preferences/com.apple.controlcenter.plist");
-			DEBUG_LOG(("Focus Check: Started %1.").arg(u"plutil"_q + arguments.join(' ')));
-			process.start(u"plutil"_q, arguments);
-		};
-		_focusedCallbacks.push_back(std::move(callback));
-		_waitingFocus = _waitingDnd = true;
-		start(_focus, u"NSStatusItem Visible FocusModes"_q);
-		start(_dnd, u"NSStatusItem Visible DoNotDisturb"_q);
-	}
-}
-
-void Manager::Private::checkFocusState() {
-	if (_waitingFocus || _waitingDnd) {
-		return;
-	}
-	const auto istrue = [](QProcess &process) {
-		const auto output = process.readAllStandardOutput();
-		DEBUG_LOG(("Focus Check: %1").arg(output));
-		const auto result = (output.trimmed() == u"true"_q);
-		return result;
-	};
-	_focused = istrue(_focus) || istrue(_dnd);
-	auto callbacks = base::take(_focusedCallbacks);
-	if (!_focused) {
-		for (const auto &callback : callbacks) {
-			callback();
-		}
-	}
-}
-
 Manager::Private::~Private() {
-	if (_waitingDnd) {
-		_dnd.kill();
-	}
-	if (_waitingFocus) {
-		_focus.kill();
-	}
 	if (_clearingThread.joinable()) {
 		putClearTask(ClearFinish());
 		_clearingThread.join();
@@ -572,23 +521,9 @@ Manager::Manager(Window::Notifications::System *system) : NativeManager(system)
 Manager::~Manager() = default;
 
 void Manager::doShowNativeNotification(
-		not_null<PeerData*> peer,
-		MsgId topicRootId,
-		Ui::PeerUserpicView &userpicView,
-		MsgId msgId,
-		const QString &title,
-		const QString &subtitle,
-		const QString &msg,
-		DisplayOptions options) {
-	_private->showNotification(
-		peer,
-		topicRootId,
-		userpicView,
-		msgId,
-		title,
-		subtitle,
-		msg,
-		options);
+		NotificationInfo &&info,
+		Ui::PeerUserpicView &userpicView) {
+	_private->showNotification(std::move(info), userpicView);
 }
 
 void Manager::doClearAllFast() {
@@ -620,11 +555,11 @@ bool Manager::doSkipToast() const {
 }
 
 void Manager::doMaybePlaySound(Fn<void()> playSound) {
-	_private->invokeIfNotFocused(std::move(playSound));
+	// Play through native notification system.
 }
 
 void Manager::doMaybeFlashBounce(Fn<void()> flashBounce) {
-	_private->invokeIfNotFocused(std::move(flashBounce));
+	flashBounce();
 }
 
 } // namespace Notifications
