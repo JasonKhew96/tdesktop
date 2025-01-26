@@ -184,9 +184,30 @@ void System::createManager() {
 	Platform::Notifications::Create(this);
 }
 
-void System::setManager(std::unique_ptr<Manager> manager) {
-	_manager = std::move(manager);
-	if (!_manager) {
+void System::setManager(Fn<std::unique_ptr<Manager>()> create) {
+	Expects(_manager != nullptr);
+	const auto guard = gsl::finally([&] {
+		Ensures(_manager != nullptr);
+	});
+
+	if ((Core::App().settings().nativeNotifications()
+				|| Platform::Notifications::Enforced())
+			&& Platform::Notifications::Supported()) {
+		if (_manager->type() == ManagerType::Native) {
+			return;
+		}
+
+		if (auto manager = create()) {
+			_manager = std::move(manager);
+			return;
+		}
+	}
+
+	if (Platform::Notifications::Enforced()) {
+		if (_manager->type() != ManagerType::Dummy) {
+			_manager = std::make_unique<DummyManager>(this);
+		}
+	} else if (_manager->type() != ManagerType::Default) {
 		_manager = std::make_unique<Default::Manager>(this);
 	}
 }
@@ -1256,7 +1277,9 @@ void NativeManager::doShowNotification(NotificationFields &&fields) {
 	// #TODO optimize
 	auto userpicView = item->history()->peer->createUserpicView();
 	const auto owner = &item->history()->owner();
-	const auto sound = fields.soundId ? [=, id = *fields.soundId] {
+	const auto withSound = fields.soundId
+		&& Core::App().settings().soundNotify();
+	const auto sound = withSound ? [=, id = *fields.soundId] {
 		return _localSoundCache.sound(id, [=] {
 			return Core::App().notifications().lookupSoundBytes(owner, id);
 		}, [=] {
