@@ -154,12 +154,9 @@ const auto CommandNames = base::flat_map<Command, QString>{
 
 	{ Command::ReadChat       , u"read_chat"_q },
 
-<<<<<<< HEAD
 	{ Command::FastForward    , u"fast_forward"_q },
 	{ Command::FastCopy       , u"fast_copy"_q },
-=======
 	{ Command::ShowChatMenu   , u"show_chat_menu"_q },
->>>>>>> upstream/dev
 };
 
 [[maybe_unused]] constexpr auto kNoValue = {
@@ -449,13 +446,10 @@ void Manager::fillDefaults() {
 	set(u"ctrl+j"_q, Command::ShowContacts);
 
 	set(u"ctrl+r"_q, Command::ReadChat);
-<<<<<<< HEAD
 	set(qsl("alt+f"), Command::FastForward);
 	set(qsl("alt+c"), Command::FastCopy);
-=======
 
 	set(u"ctrl+="_q, Command::ShowChatMenu);
->>>>>>> upstream/dev
 }
 
 void Manager::writeDefaultFile() {
